@@ -2,9 +2,11 @@
 
 #include <initializer_list>
 #include <numeric>
+#include <ratio>
 #include <utility>
 #include <iostream>
 #include <iterator>
+#include <chrono>
 
 
 std::shared_ptr<ISplitter>    SplitterCreate(IN int _nMaxBuffers, IN int _nMaxClients)
@@ -39,6 +41,8 @@ bool    ISplitter::SplitterInfoGet(OUT int* _pnMaxBuffers, OUT int* _pnMaxClient
 // Кладём данные в очередь. Если какой-то клиент не успел ещё забрать свои данные, и количество буферов (задержка) для него больше максимального значения, то ждём пока не освободятся буфера (клиент заберет данные) в течении _nTimeOutMsec. Если по истечению времени данные так и не забраны, то удаляем старые данные для этого клиента, добавляем новые (по принципу FIFO) (*). Возвращаем код ошибки, который дает понять что один или несколько клиентов “пропустили” свои данные.
 int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _pVecPut, IN int _nTimeOutMsec)
 {
+    std::unique_lock<std::mutex> locker(m_Mutex);
+
     int res=0;
 
     this->m_Frames.push_back(_pVecPut);
@@ -47,14 +51,45 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
 
     for( auto &x : m_WaitingClients )
     {
-        auto client = m_Clients.find(x);
-
-        client->second = newBuf;
+        m_Clients[x] = newBuf;
     }
 
     m_WaitingClients.clear();
 
+    locker.unlock();
+
+    m_ConditionalVariable.notify_all();
+
     return res;
+}
+
+// По идентификатору клиента запрашиваем данные, если данных пока нет, то ожидаем _nTimeOutMsec пока не будут добавлены новые данные, в случае превышения времени ожидания - возвращаем ошибку.
+int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector<uint8_t>>& _pVecGet, IN int _nTimeOutMsec)
+{
+    if (_nClientID > m_nMaxClients || _nClientID < 1 ) return 2;
+
+    auto& pNextFrame = m_Clients[_nClientID];
+
+    if ( pNextFrame == m_Frames.end() )
+    {
+        if (m_WaitingClients.find(_nClientID) == m_WaitingClients.end() ) return 3;
+
+        std::unique_lock<std::mutex> locker(m_Mutex);
+
+        std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
+
+        auto res = m_ConditionalVariable.wait_for( locker , milliSeconds);
+
+        if (res == std::cv_status::timeout) return 1;
+
+        if ( pNextFrame == m_Frames.end() ) return 4;
+    }
+
+    _pVecGet = *pNextFrame;
+
+    pNextFrame++;
+
+    return 0;
 }
 
 // Сбрасываем все буфера, прерываем все ожидания.
@@ -62,13 +97,13 @@ int    ISplitter::SplitterFlush()
 {
     m_Frames.clear();
 
-    for (auto&& [first, second] : m_Clients)
+    for (auto&& [nClientId, pNextFrame] : m_Clients)
     {
-        if ( second != m_Frames.end() )
+        if ( pNextFrame != m_Frames.end() )
         {
-            second = m_Frames.end();
+            pNextFrame = m_Frames.end();
 
-            m_WaitingClients.insert( first );
+            m_WaitingClients.insert( nClientId );
         }
     }
     return 0;
@@ -95,13 +130,13 @@ bool    ISplitter::SplitterClientAdd(OUT int* _pnClientID)
 // Удаляем клиента по идентификатору, если клиент находиться в процессе ожидания буфера, то прерываем ожидание.
 bool    ISplitter::SplitterClientRemove(IN int _nClientID)
 {
-    auto client = m_Clients.find(_nClientID);
+    auto pClient = m_Clients.find(_nClientID);
 
-    if ( client == m_Clients.end() ) return false;
+    if ( pClient == m_Clients.end() ) return false;
 
-    m_ClientsIdsBag.push_front( client->first ); // возвращаем значок
+    m_ClientsIdsBag.push_front( pClient->first ); // возвращаем значок
 
-    m_Clients.erase( client );
+    m_Clients.erase( pClient );
 
     return true;
 }
@@ -118,23 +153,23 @@ bool    ISplitter::SplitterClientGetByIndex(IN int _nIndex, OUT int* _pnClientID
 {
     if (_nIndex >= m_Clients.size()) return false;
 
-    auto client = m_Clients.begin();
+    auto pClient = m_Clients.begin();
 
-    std::advance(client, _nIndex);
+    std::advance(pClient, _nIndex);
 
-    *_pnClientID = client->first;
+    auto& [nClientId, pNextFrame] = *pClient;
 
-    *_pnLatency = std::distance( client->second, m_Frames.end() );
+    *_pnClientID = nClientId;
+
+    *_pnLatency = std::distance( pNextFrame, m_Frames.end() );
 
     return true;
-}
-
-// По идентификатору клиента запрашиваем данные, если данных пока нет, то ожидаем _nTimeOutMsec пока не будут добавлены новые данные, в случае превышения времени ожидания - возвращаем ошибку.
-int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector<uint8_t>>& _pVecGet, IN int _nTimeOutMsec)
-{
 }
 
 // Закрытие объекта сплиттера - все ожидания должны быть прерваны все вызовы возвращают соответствующую ошибку.
 void    ISplitter::SplitterClose()
 {
 }
+
+
+

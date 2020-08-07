@@ -5,6 +5,7 @@
 #include <map>
 #include <set>
 #include <mutex>
+#include <condition_variable>
 
 #define OUT
 #define IN
@@ -49,13 +50,14 @@ public:
 
 private:
 
-    std::timed_mutex m_TimedMutex;
+    std::mutex m_Mutex;
+    std::condition_variable m_ConditionalVariable;
     FrameBuf m_Frames;
     std::map<int, Client> m_Clients;
     std::set<int> m_WaitingClients;
+    std::list<int> m_ClientsIdsBag;
     int m_nMaxBuffers;
     int m_nMaxClients;
-    std::list<int> m_ClientsIdsBag;
 };
 
 std::shared_ptr<ISplitter>    SplitterCreate(IN int _nMaxBuffers, IN int _nMaxClients);
