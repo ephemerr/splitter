@@ -11,3 +11,9 @@ file(GLOB_RECURSE sources_test test/*.cpp test/*.hpp)
 add_executable(splitter_test ${sources} ${sources_test})
 
 target_include_directories(splitter_test PUBLIC src test)
+
+# add_compile_options(-pthread)
+
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(splitter_test PRIVATE Threads::Threads)

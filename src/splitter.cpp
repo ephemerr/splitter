@@ -9,6 +9,7 @@
 #include <chrono>
 #include <thread>
 
+using namespace std::chrono_literals;
 
 std::shared_ptr<ISplitter>    SplitterCreate(IN int _nMaxBuffers, IN int _nMaxClients)
 {
@@ -21,18 +22,30 @@ ISplitter::ISplitter(int _nMaxBuffers, int _nMaxClients)
     : m_nMaxBuffers(_nMaxBuffers)
     , m_nMaxClients(_nMaxClients)
 {
+    if (m_nMaxClients > 0 && m_nMaxClients > 0)
+    {
+        m_bIsClosed = false;
+    }
+    else
+    {
+        return;
+    }
     m_ClientsIdsBag.resize(m_nMaxClients);
     std::iota(std::begin(m_ClientsIdsBag), std::end(m_ClientsIdsBag), 1);
 }
 
 ISplitter::~ISplitter()
 {
+    this->SplitterClose();
+
     m_Clients.clear();
     m_Frames.clear();
 }
 
 bool    ISplitter::SplitterInfoGet(OUT int* _pnMaxBuffers, OUT int* _pnMaxClients)
 {
+    if ( m_bIsClosed ) return false;
+
     *_pnMaxBuffers = m_nMaxBuffers;
     *_pnMaxClients = m_nMaxClients;
 
@@ -42,66 +55,74 @@ bool    ISplitter::SplitterInfoGet(OUT int* _pnMaxBuffers, OUT int* _pnMaxClient
 // Кладём данные в очередь. Если какой-то клиент не успел ещё забрать свои данные, и количество буферов (задержка) для него больше максимального значения, то ждём пока не освободятся буфера (клиент заберет данные) в течении _nTimeOutMsec. Если по истечению времени данные так и не забраны, то удаляем старые данные для этого клиента, добавляем новые (по принципу FIFO) (*). Возвращаем код ошибки, который дает понять что один или несколько клиентов “пропустили” свои данные.
 int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _pVecPut, IN int _nTimeOutMsec)
 {
-    WriteLock write_locker(m_Mutex);
-
-    this->m_Frames.push_back(_pVecPut);
-
-    auto newBuf = --m_Frames.end();
-
     std::list<int> slowClients;
 
-    // проверяем ждущих и отставших
-
-    for( auto&& [nClientId, pNextFrame] : m_Clients)
+    // add frame, check slow and quick clients
     {
-        if ( pNextFrame == m_Frames.end() )
+        WriteLock write_locker(m_Mutex);
+
+        if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
+
+        this->m_Frames.push_back(_pVecPut);
+
+        auto newBuf = --m_Frames.end();
+
+        for( auto&& [nClientId, pNextFrame] : m_Clients)
         {
-            pNextFrame = newBuf;
+            if ( pNextFrame == m_Frames.end() )
+            {
+                pNextFrame = newBuf;
+            }
+
+            if ( pNextFrame == m_Frames.begin() )
+            {
+                slowClients.push_back( nClientId );
+            }
         }
 
-        if ( pNextFrame == m_Frames.begin() )
-        {
-            slowClients.push_back( nClientId );
-        }
+        m_ConditionalVariable.notify_all();
     }
 
-    write_locker.unlock();
+    // wait for slow
+    {
+        ReadLock read_locker(m_Mutex);
 
-    m_ConditionalVariable.notify_all();
+        if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
-    // ждем отставших
+        if ( m_Frames.size() <= m_nMaxBuffers ) return 0;
 
-    ReadLock read_locker(m_Mutex);
+        if ( not slowClients.empty() )
+        {
+            std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
 
-    if ( m_Frames.size() <= m_nMaxBuffers || slowClients.empty() ) return 0;
+            std::this_thread::sleep_for( milliSeconds );
 
-    std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
-
-    std::this_thread::sleep_for( milliSeconds );
-
-    read_locker.unlock();
-
-    // удаляем последний кадр
-
-    write_locker.lock();
+        }
+    }
 
     int res = 0;
 
-    for (auto& id : slowClients)
+    // remove last frame
     {
-        auto pClient = m_Clients.find(id);
+        WriteLock write_locker(m_Mutex);
 
-        if (pClient == m_Clients.end() ) continue;
+        if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
-        if ( pClient->second == m_Frames.begin() )
+        for (auto& id : slowClients)
         {
-            pClient->second++;
+            auto pClient = m_Clients.find(id);
 
-            res = ERR_FORCED_FRAMES_REMOVE;
+            if (pClient == m_Clients.end() ) continue;
+
+            if ( pClient->second == m_Frames.begin() )
+            {
+                pClient->second++;
+
+                res = ERR_FORCED_FRAMES_REMOVE;
+            }
         }
+        m_Frames.pop_front();
     }
-
-    m_Frames.pop_front();
 
     return res;
 }
@@ -109,6 +130,8 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
 // По идентификатору клиента запрашиваем данные, если данных пока нет, то ожидаем _nTimeOutMsec пока не будут добавлены новые данные, в случае превышения времени ожидания - возвращаем ошибку.
 int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector<uint8_t>>& _pVecGet, IN int _nTimeOutMsec)
 {
+    if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
+
     if ( _nClientID > m_nMaxClients || _nClientID < 1 ) return ERR_BAD_CLIENT_ID;
 
     auto& pNextFrame = m_Clients[_nClientID];
@@ -119,7 +142,9 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 
         std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
 
-        auto res = m_ConditionalVariable.wait_for(locker, milliSeconds);
+        auto res = m_ConditionalVariable.wait_for(locker, 1000ms);
+
+        if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
         if ( res == std::cv_status::timeout ) return ERR_TIMEOUT;
 
@@ -127,6 +152,8 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
     }
 
     ReadLock read_locker(m_Mutex);
+
+    if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
     _pVecGet = *pNextFrame;
 
@@ -139,6 +166,8 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 int    ISplitter::SplitterFlush()
 {
     WriteLock locker(m_Mutex);
+
+    if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
     m_Frames.clear();
 
@@ -156,6 +185,8 @@ int    ISplitter::SplitterFlush()
 bool    ISplitter::SplitterClientAdd(OUT int* _pnClientID)
 {
     WriteLock locker(m_Mutex);
+
+    if ( m_bIsClosed ) return false;
 
     if ( m_ClientsIdsBag.empty() ) return false;
 
@@ -175,6 +206,8 @@ bool    ISplitter::SplitterClientRemove(IN int _nClientID)
 {
     WriteLock locker(m_Mutex);
 
+    if ( m_bIsClosed ) return false;
+
     auto pClient = m_Clients.find(_nClientID);
 
     if ( pClient == m_Clients.end() ) return false;
@@ -191,6 +224,8 @@ bool    ISplitter::SplitterClientGetCount(OUT int* _pnCount)
 {
     ReadLock read_locker(m_Mutex);
 
+    if ( m_bIsClosed ) return false;
+
     *_pnCount  = m_Clients.size();
 
     return true;
@@ -199,6 +234,8 @@ bool    ISplitter::SplitterClientGetCount(OUT int* _pnCount)
 bool    ISplitter::SplitterClientGetByIndex(IN int _nIndex, OUT int* _pnClientID, OUT int* _pnLatency)
 {
     ReadLock read_locker(m_Mutex);
+
+    if ( m_bIsClosed ) return false;
 
     if (_nIndex >= m_Clients.size()) return false;
 
@@ -218,7 +255,7 @@ bool    ISplitter::SplitterClientGetByIndex(IN int _nIndex, OUT int* _pnClientID
 // Закрытие объекта сплиттера - все ожидания должны быть прерваны все вызовы возвращают соответствующую ошибку.
 void    ISplitter::SplitterClose()
 {
+    WriteLock write_locker(m_Mutex);
+
+    m_ConditionalVariable.notify_all();
 }
-
-
-

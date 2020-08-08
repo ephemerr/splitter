@@ -1,12 +1,16 @@
-#include <memory>
+#include <iostream>
+#include <mutex>
 #define CATCH_CONFIG_MAIN
 
+#include <memory>
 #include <type_traits>
+#include <thread>
 
 #include "catch.hpp"
 
 #include "splitter.h"
 
+using namespace std::chrono_literals;
 
 TEST_CASE( "Splitter", "[splitter]" )
 {
@@ -108,15 +112,27 @@ TEST_CASE( "Splitter", "[splitter]" )
 
             CHECK( nClientId == i + 1 );
 
-            CHECK( nLatency == nCliensCount - i );
+            CHECK( nLatency == nCliensCount - i);
+
+            for(int j=0; j<nLatency; j++)
+            {
+                CHECK( pSplitter->SplitterGet(nClientId, pFrame, 1) == 0 );
+            }
+            CHECK( pSplitter->SplitterGet(nClientId, pFrame, 100) == ISplitter::ERR_TIMEOUT );
         }
-    }
 
-    SECTION("Wait for new frames")
-    {
+        std::thread putter(
+        [&] {
+            for(int i=0; i<500; i++)
+            {
+                std::this_thread::sleep_for(100ms);
 
+                CHECK( pSplitter->SplitterPut(pFrame, 1000) == 0 );
+            }
+        });
+
+        putter.join();
     }
 }
-
 
 

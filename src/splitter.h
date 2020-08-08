@@ -30,6 +30,7 @@ public:
         ,ERR_SPOUROIUS_WAKEUP
         ,ERR_TIMEOUT
         ,ERR_FORCED_FRAMES_REMOVE
+        ,ERR_SPLITTER_IS_CLOSED
     };
 
     ISplitter(int _nMaxBuffers, int _nMaxClients);
@@ -62,6 +63,7 @@ public:
 
 private:
 
+    bool m_bIsClosed{true};
     Lock m_Mutex;
     std::condition_variable_any m_ConditionalVariable;
     FrameBuf m_Frames;
