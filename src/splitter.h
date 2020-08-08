@@ -29,7 +29,7 @@ public:
         ,ERR_BAD_CLIENT_ID
         ,ERR_SPOUROIUS_WAKEUP
         ,ERR_TIMEOUT
-        ,ERR_BAD_FRAME_UPDATE
+        ,ERR_FORCED_FRAMES_REMOVE
     };
 
     ISplitter(int _nMaxBuffers, int _nMaxClients);

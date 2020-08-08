@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iterator>
 #include <chrono>
+#include <thread>
 
 
 std::shared_ptr<ISplitter>    SplitterCreate(IN int _nMaxBuffers, IN int _nMaxClients)
@@ -41,13 +42,15 @@ bool    ISplitter::SplitterInfoGet(OUT int* _pnMaxBuffers, OUT int* _pnMaxClient
 // Кладём данные в очередь. Если какой-то клиент не успел ещё забрать свои данные, и количество буферов (задержка) для него больше максимального значения, то ждём пока не освободятся буфера (клиент заберет данные) в течении _nTimeOutMsec. Если по истечению времени данные так и не забраны, то удаляем старые данные для этого клиента, добавляем новые (по принципу FIFO) (*). Возвращаем код ошибки, который дает понять что один или несколько клиентов “пропустили” свои данные.
 int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _pVecPut, IN int _nTimeOutMsec)
 {
-    WriteLock locker(m_Mutex);
-
-    int res=0;
+    WriteLock write_locker(m_Mutex);
 
     this->m_Frames.push_back(_pVecPut);
 
     auto newBuf = --m_Frames.end();
+
+    std::list<int> slowClients;
+
+    // проверяем ждущих и отставших
 
     for( auto&& [nClientId, pNextFrame] : m_Clients)
     {
@@ -55,11 +58,50 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
         {
             pNextFrame = newBuf;
         }
+
+        if ( pNextFrame == m_Frames.begin() )
+        {
+            slowClients.push_back( nClientId );
+        }
     }
 
-    locker.unlock();
+    write_locker.unlock();
 
     m_ConditionalVariable.notify_all();
+
+    // ждем отставших
+
+    ReadLock read_locker(m_Mutex);
+
+    if ( m_Frames.size() <= m_nMaxBuffers || slowClients.empty() ) return 0;
+
+    std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
+
+    std::this_thread::sleep_for( milliSeconds );
+
+    read_locker.unlock();
+
+    // удаляем последний кадр
+
+    write_locker.lock();
+
+    int res = 0;
+
+    for (auto& id : slowClients)
+    {
+        auto pClient = m_Clients.find(id);
+
+        if (pClient == m_Clients.end() ) continue;
+
+        if ( pClient->second == m_Frames.begin() )
+        {
+            pClient->second++;
+
+            res = ERR_FORCED_FRAMES_REMOVE;
+        }
+    }
+
+    m_Frames.pop_front();
 
     return res;
 }
