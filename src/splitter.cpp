@@ -96,7 +96,6 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
             std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
 
             std::this_thread::sleep_for( milliSeconds );
-
         }
     }
 
@@ -130,19 +129,21 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
 // По идентификатору клиента запрашиваем данные, если данных пока нет, то ожидаем _nTimeOutMsec пока не будут добавлены новые данные, в случае превышения времени ожидания - возвращаем ошибку.
 int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector<uint8_t>>& _pVecGet, IN int _nTimeOutMsec)
 {
+    WriteLock locker(m_Mutex);
+
     if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
     if ( _nClientID > m_nMaxClients || _nClientID < 1 ) return ERR_BAD_CLIENT_ID;
 
-    auto& pNextFrame = m_Clients[_nClientID];
+    auto pClient = m_Clients.find(_nClientID);
+
+    if ( pClient == m_Clients.end() ) return ERR_BAD_CLIENT_ID;
+
+    auto& pNextFrame = pClient->second;
 
     if ( pNextFrame == m_Frames.end() )
     {
-        WriteLock locker(m_Mutex);
-
-        std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
-
-        auto res = m_ConditionalVariable.wait_for(locker, 1000ms);
+        auto res = m_ConditionalVariable.wait_for(locker, _nTimeOutMsec*1ms);
 
         if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
@@ -150,10 +151,6 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 
         if ( pNextFrame == m_Frames.end() ) return ERR_SPOUROIUS_WAKEUP;
     }
-
-    ReadLock read_locker(m_Mutex);
-
-    if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
     _pVecGet = *pNextFrame;
 

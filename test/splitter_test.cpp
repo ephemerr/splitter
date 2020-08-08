@@ -1,3 +1,4 @@
+#include <functional>
 #include <iostream>
 #include <mutex>
 #define CATCH_CONFIG_MAIN
@@ -123,16 +124,61 @@ TEST_CASE( "Splitter", "[splitter]" )
 
         std::thread putter(
         [&] {
-            for(int i=0; i<500; i++)
+            for(int i=0; i<15; i++)
             {
                 std::this_thread::sleep_for(100ms);
 
-                CHECK( pSplitter->SplitterPut(pFrame, 1000) == 0 );
+                if (i >= nMaxBufs)
+                {
+                    CHECK( pSplitter->SplitterPut(pFrame, 1000) == ISplitter::ERR_FORCED_FRAMES_REMOVE );
+                } else
+                {
+                    CHECK( pSplitter->SplitterPut(pFrame, 1000) == 0 );
+                }
             }
         });
 
         putter.join();
     }
+
+    SECTION("Async")
+    {
+        auto pFrameIn1 = std::make_shared<Frame>( 1000000 );
+        auto pFrameIn2 = std::make_shared<Frame>( 1000000 );
+        auto pFrame1 = std::make_shared<Frame>( 1000000 );
+        auto pFrame2 = std::make_shared<Frame>( 1000000 );
+        auto pFrame3 = std::make_shared<Frame>( 1000000 );
+
+        std::function<void(int, int, FramePtr)> putLoop = [&](int _nNum, int _nInterval, FramePtr _pFrameIn)
+        {
+            for(int i=0; i<_nNum; i++)
+            {
+                std::this_thread::sleep_for(_nInterval*1ms);
+
+                CHECK( pSplitter->SplitterPut(_pFrameIn, 1000) == 0 );
+            }
+        };
+
+        std::function<void(int, int, FramePtr, int)> getLoop = [&](int _nNum, int _nInterval, FramePtr _pFrameOut, int _nClientId )
+        {
+            for(int i=0; i<_nNum; i++)
+            {
+                std::this_thread::sleep_for(_nInterval*1ms);
+
+                CHECK( pSplitter->SplitterGet(_nClientId, _pFrameOut, 1) >= 0 );
+            }
+        };
+
+        std::thread p1( putLoop, 1000, 10,  pFrameIn1 );
+        std::thread p2( putLoop, 1000, 10,  pFrameIn2 );
+        std::thread g1( getLoop, 2000, 10,  pFrame1, 1);
+        std::thread g2( getLoop, 2000, 1,   pFrame2, 2);
+        std::thread g3( getLoop, 2000, 100, pFrame3, 3);
+
+        p1.join();
+        p2.join();
+        g1.join();
+        g2.join();
+        g3.join();
+    }
 }
-
-
