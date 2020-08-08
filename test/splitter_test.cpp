@@ -77,13 +77,13 @@ TEST_CASE( "Splitter", "[splitter]" )
 
     }
 
+    int client[3] = {};
+
     SECTION("Put frames")
     {
         auto pFrame = std::make_shared<Frame>( 1000000 );
 
         int nClientId = 0;
-
-        int client[3];
 
         int nLatency = -1;
 
@@ -110,6 +110,11 @@ TEST_CASE( "Splitter", "[splitter]" )
 
             CHECK( nLatency == nCliensCount - i );
         }
+    }
+
+    SECTION("Wait for new frames")
+    {
+
     }
 }
 

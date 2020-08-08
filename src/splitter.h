@@ -1,10 +1,10 @@
 
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <list>
 #include <map>
-#include <set>
-#include <mutex>
+#include <shared_mutex>
 #include <condition_variable>
 
 #define OUT
@@ -15,10 +15,22 @@ typedef std::shared_ptr<Frame> FramePtr;
 typedef std::list<FramePtr> FrameBuf;
 typedef FrameBuf::iterator Client;
 
+typedef std::shared_mutex Lock;
+typedef std::unique_lock< Lock >  WriteLock;
+typedef std::shared_lock< Lock >  ReadLock;
+
 class ISplitter
 {
     // ISplitter интерфейс
 public:
+
+    enum ErrorCode {
+        NO_ERROR=0
+        ,ERR_BAD_CLIENT_ID
+        ,ERR_SPOUROIUS_WAKEUP
+        ,ERR_TIMEOUT
+        ,ERR_BAD_FRAME_UPDATE
+    };
 
     ISplitter(int _nMaxBuffers, int _nMaxClients);
 
@@ -50,14 +62,13 @@ public:
 
 private:
 
-    std::mutex m_Mutex;
-    std::condition_variable m_ConditionalVariable;
+    Lock m_Mutex;
+    std::condition_variable_any m_ConditionalVariable;
     FrameBuf m_Frames;
     std::map<int, Client> m_Clients;
-    std::set<int> m_WaitingClients;
     std::list<int> m_ClientsIdsBag;
-    int m_nMaxBuffers;
-    int m_nMaxClients;
+    int m_nMaxBuffers{0};
+    int m_nMaxClients{0};
 };
 
 std::shared_ptr<ISplitter>    SplitterCreate(IN int _nMaxBuffers, IN int _nMaxClients);
