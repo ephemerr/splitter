@@ -1,23 +1,13 @@
+#ifndef _SPLITTER_H
+#define _SPLITTER_H
 
-#include <atomic>
-#include <memory>
-#include <vector>
-#include <list>
-#include <map>
-#include <shared_mutex>
+#include "splitter_definitions.h"
+#include "splitter_client.h"
+
 #include <condition_variable>
 
 #define OUT
 #define IN
-
-typedef std::vector<uint8_t> Frame;
-typedef std::shared_ptr<Frame> FramePtr;
-typedef std::list<FramePtr> FrameBuf;
-typedef FrameBuf::iterator Client;
-
-typedef std::shared_mutex Lock;
-typedef std::unique_lock< Lock >  WriteLock;
-typedef std::shared_lock< Lock >  ReadLock;
 
 class ISplitter
 {
@@ -63,11 +53,14 @@ public:
 
 private:
 
+    std::list<int> SlowClients();
+
     bool m_bIsClosed{true};
-    Lock m_Mutex;
-    std::condition_variable_any m_ConditionalVariable;
-    FrameBuf m_Frames;
-    std::map<int, Client> m_Clients;
+    TLock m_Mutex;
+    std::condition_variable_any m_NewFrameUploaded;
+    std::condition_variable_any m_NoSlowClients;
+    TFrameBuf m_Frames;
+    std::map<int, ClientPtr> m_Clients;
     std::list<int> m_ClientsIdsBag;
     int m_nMaxBuffers{0};
     int m_nMaxClients{0};
@@ -75,3 +68,4 @@ private:
 
 std::shared_ptr<ISplitter>    SplitterCreate(IN int _nMaxBuffers, IN int _nMaxClients);
 
+#endif /*_SPLITTER_H*/

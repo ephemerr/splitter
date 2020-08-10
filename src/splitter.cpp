@@ -1,6 +1,7 @@
 #include "splitter.h"
 
 #include <initializer_list>
+#include <memory>
 #include <numeric>
 #include <ratio>
 #include <utility>
@@ -55,73 +56,69 @@ bool    ISplitter::SplitterInfoGet(OUT int* _pnMaxBuffers, OUT int* _pnMaxClient
 // Кладём данные в очередь. Если какой-то клиент не успел ещё забрать свои данные, и количество буферов (задержка) для него больше максимального значения, то ждём пока не освободятся буфера (клиент заберет данные) в течении _nTimeOutMsec. Если по истечению времени данные так и не забраны, то удаляем старые данные для этого клиента, добавляем новые (по принципу FIFO) (*). Возвращаем код ошибки, который дает понять что один или несколько клиентов “пропустили” свои данные.
 int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _pVecPut, IN int _nTimeOutMsec)
 {
+    static std::mutex PutMutex;
+
+    const std::lock_guard<std::mutex> LocalLocker(PutMutex);
+
     std::list<int> slowClients;
 
     // add frame, check slow and quick clients
+    TWriteLock write_locker(m_Mutex);
+
+    if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
+
+    this->m_Frames.push_back(_pVecPut);
+
+    auto newBuf = --m_Frames.end();
+
+    for( auto&& [nClientId, pClient] : m_Clients)
     {
-        WriteLock write_locker(m_Mutex);
-
-        if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
-
-        this->m_Frames.push_back(_pVecPut);
-
-        auto newBuf = --m_Frames.end();
-
-        for( auto&& [nClientId, pNextFrame] : m_Clients)
+        if ( pClient->NextFrame() == m_Frames.end() )
         {
-            if ( pNextFrame == m_Frames.end() )
-            {
-                pNextFrame = newBuf;
-            }
-
-            if ( pNextFrame == m_Frames.begin() )
-            {
-                slowClients.push_back( nClientId );
-            }
+            pClient->SetNextFrame( newBuf );
         }
 
-        m_ConditionalVariable.notify_all();
+        if ( pClient->NextFrame()  == m_Frames.begin() )
+        {
+            slowClients.push_back( nClientId );
+        }
     }
+
+    m_NewFrameUploaded.notify_all();
 
     // wait for slow
+
+    if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
+
+    if ( m_Frames.size() <= m_nMaxBuffers ) return 0;
+
+    if ( not slowClients.empty() )
     {
-        ReadLock read_locker(m_Mutex);
+        m_NoSlowClients.wait_for(write_locker, _nTimeOutMsec*1ms);
 
         if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
-        if ( m_Frames.size() <= m_nMaxBuffers ) return 0;
+        if ( m_Frames.empty() ) return 0;
 
-        if ( not slowClients.empty() )
-        {
-            std::chrono::milliseconds milliSeconds(_nTimeOutMsec);
-
-            std::this_thread::sleep_for( milliSeconds );
-        }
+        slowClients = SlowClients();
     }
+
+    // remove last frame
 
     int res = 0;
 
-    // remove last frame
+    for (auto& id : slowClients)
     {
-        WriteLock write_locker(m_Mutex);
+        auto ppClient = m_Clients.find(id);
 
-        if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
+        auto pClient = ppClient->second;
 
-        for (auto& id : slowClients)
-        {
-            auto pClient = m_Clients.find(id);
+        pClient->FrameIncrement();
 
-            if (pClient == m_Clients.end() ) continue;
-
-            if ( pClient->second == m_Frames.begin() )
-            {
-                pClient->second++;
-
-                res = ERR_FORCED_FRAMES_REMOVE;
-            }
-        }
-        m_Frames.pop_front();
+        res = ERR_FORCED_FRAMES_REMOVE;
     }
+
+    m_Frames.pop_front();
 
     return res;
 }
@@ -129,32 +126,32 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
 // По идентификатору клиента запрашиваем данные, если данных пока нет, то ожидаем _nTimeOutMsec пока не будут добавлены новые данные, в случае превышения времени ожидания - возвращаем ошибку.
 int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector<uint8_t>>& _pVecGet, IN int _nTimeOutMsec)
 {
-    WriteLock locker(m_Mutex);
+    TReadLock locker(m_Mutex);
 
     if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
     if ( _nClientID > m_nMaxClients || _nClientID < 1 ) return ERR_BAD_CLIENT_ID;
 
-    auto pClient = m_Clients.find(_nClientID);
+    auto ppClient = m_Clients.find(_nClientID);
 
-    if ( pClient == m_Clients.end() ) return ERR_BAD_CLIENT_ID;
+    if ( ppClient == m_Clients.end() ) return ERR_BAD_CLIENT_ID;
 
-    auto& pNextFrame = pClient->second;
+    auto& pClient = ppClient->second;
 
-    if ( pNextFrame == m_Frames.end() )
+    if ( pClient->NextFrame() == m_Frames.end() )
     {
-        auto res = m_ConditionalVariable.wait_for(locker, _nTimeOutMsec*1ms);
+        auto res = m_NewFrameUploaded.wait_for(locker, _nTimeOutMsec*1ms);
 
         if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
         if ( res == std::cv_status::timeout ) return ERR_TIMEOUT;
 
-        if ( pNextFrame == m_Frames.end() ) return ERR_SPOUROIUS_WAKEUP;
+        if ( pClient->NextFrame() == m_Frames.end() ) return ERR_SPOUROIUS_WAKEUP;
     }
 
-    _pVecGet = *pNextFrame;
+    _pVecGet = pClient->PopFrame();
 
-    pNextFrame++;
+    if ( SlowClients().empty() ) m_NoSlowClients.notify_all();
 
     return 0;
 }
@@ -162,17 +159,17 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 // Сбрасываем все буфера, прерываем все ожидания.
 int    ISplitter::SplitterFlush()
 {
-    WriteLock locker(m_Mutex);
+    TWriteLock locker(m_Mutex);
 
     if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
     m_Frames.clear();
 
-    for (auto&& [nClientId, pNextFrame] : m_Clients)
+    for (auto&& [nClientId, pClient] : m_Clients)
     {
-        if ( pNextFrame != m_Frames.end() )
+        if ( pClient->NextFrame() != m_Frames.end() )
         {
-            pNextFrame = m_Frames.end();
+            pClient->SetNextFrame( m_Frames.end() );
         }
     }
     return 0;
@@ -181,7 +178,7 @@ int    ISplitter::SplitterFlush()
 // Добавляем нового клиента - возвращаем уникальный идентификатор клиента.
 bool    ISplitter::SplitterClientAdd(OUT int* _pnClientID)
 {
-    WriteLock locker(m_Mutex);
+    TWriteLock locker(m_Mutex);
 
     if ( m_bIsClosed ) return false;
 
@@ -193,7 +190,9 @@ bool    ISplitter::SplitterClientAdd(OUT int* _pnClientID)
 
     m_ClientsIdsBag.pop_front();
 
-    m_Clients.insert( {id, m_Frames.end()} );
+    auto&& pClient = std::make_shared<ISplitterClient>(id, m_Frames.end() );
+
+    m_Clients.insert( {id, pClient } );
 
     return true;
 }
@@ -201,17 +200,17 @@ bool    ISplitter::SplitterClientAdd(OUT int* _pnClientID)
 // Удаляем клиента по идентификатору, если клиент находиться в процессе ожидания буфера, то прерываем ожидание.
 bool    ISplitter::SplitterClientRemove(IN int _nClientID)
 {
-    WriteLock locker(m_Mutex);
+    TWriteLock locker(m_Mutex);
 
     if ( m_bIsClosed ) return false;
 
-    auto pClient = m_Clients.find(_nClientID);
+    auto ppClient = m_Clients.find(_nClientID);
 
-    if ( pClient == m_Clients.end() ) return false;
+    if ( ppClient == m_Clients.end() ) return false;
 
-    m_ClientsIdsBag.push_front( pClient->first ); // возвращаем значок
+    m_ClientsIdsBag.push_front( ppClient->first ); // возвращаем значок
 
-    m_Clients.erase( pClient );
+    m_Clients.erase( ppClient );
 
     return true;
 }
@@ -219,7 +218,7 @@ bool    ISplitter::SplitterClientRemove(IN int _nClientID)
 // Перечисление клиентов, для каждого клиента возвращаем его идентификатор и количество буферов в очереди (задержку) для этого клиента.
 bool    ISplitter::SplitterClientGetCount(OUT int* _pnCount)
 {
-    ReadLock read_locker(m_Mutex);
+    TReadLock read_locker(m_Mutex);
 
     if ( m_bIsClosed ) return false;
 
@@ -230,21 +229,21 @@ bool    ISplitter::SplitterClientGetCount(OUT int* _pnCount)
 
 bool    ISplitter::SplitterClientGetByIndex(IN int _nIndex, OUT int* _pnClientID, OUT int* _pnLatency)
 {
-    ReadLock read_locker(m_Mutex);
+    TReadLock read_locker(m_Mutex);
 
     if ( m_bIsClosed ) return false;
 
     if (_nIndex >= m_Clients.size()) return false;
 
-    auto pClient = m_Clients.begin();
+    auto ppClient = m_Clients.begin();
 
-    std::advance(pClient, _nIndex);
+    std::advance(ppClient, _nIndex);
 
-    auto& [nClientId, pNextFrame] = *pClient;
+    auto& [nClientId, pClient] = *ppClient;
 
     *_pnClientID = nClientId;
 
-    *_pnLatency = std::distance( pNextFrame, m_Frames.end() );
+    *_pnLatency = std::distance( pClient->NextFrame(), m_Frames.end() );
 
     return true;
 }
@@ -252,7 +251,22 @@ bool    ISplitter::SplitterClientGetByIndex(IN int _nIndex, OUT int* _pnClientID
 // Закрытие объекта сплиттера - все ожидания должны быть прерваны все вызовы возвращают соответствующую ошибку.
 void    ISplitter::SplitterClose()
 {
-    WriteLock write_locker(m_Mutex);
+    TWriteLock write_locker(m_Mutex);
 
-    m_ConditionalVariable.notify_all();
+    m_NewFrameUploaded.notify_all();
 }
+
+std::list<int> ISplitter::SlowClients()
+{
+    std::list<int> slowClients;
+
+    for( auto&& [nClientId, pClient] : m_Clients)
+    {
+        if ( pClient->NextFrame()  == m_Frames.begin() )
+        {
+            slowClients.push_back( nClientId );
+        }
+    }
+    return slowClients;
+}
+

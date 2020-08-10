@@ -1,3 +1,4 @@
+#include "splitter_definitions.h"
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -82,11 +83,11 @@ TEST_CASE( "Splitter", "[splitter]" )
 
     }
 
-    int client[3] = {};
-
     SECTION("Put frames")
     {
-        auto pFrame = std::make_shared<Frame>( 1000000 );
+        int client[3] = {};
+
+        auto pFrame = std::make_shared<TFrame>( 1000000 );
 
         int nClientId = 0;
 
@@ -143,13 +144,30 @@ TEST_CASE( "Splitter", "[splitter]" )
 
     SECTION("Async")
     {
-        auto pFrameIn1 = std::make_shared<Frame>( 1000000 );
-        auto pFrameIn2 = std::make_shared<Frame>( 1000000 );
-        auto pFrame1 = std::make_shared<Frame>( 1000000 );
-        auto pFrame2 = std::make_shared<Frame>( 1000000 );
-        auto pFrame3 = std::make_shared<Frame>( 1000000 );
+        std::cout << "Async tests" << std::endl;
 
-        std::function<void(int, int, FramePtr)> putLoop = [&](int _nNum, int _nInterval, FramePtr _pFrameIn)
+        int client[3] = {};
+
+        auto pSplitter = SplitterCreate(nMaxBufs, nMaxClients);
+
+        int nClientId = 0;
+
+        int nLatency = -1;
+
+        for(int i=0; i<3; i++)
+        {
+            REQUIRE( pSplitter->SplitterClientAdd(&nClientId) );
+
+            client[i] = nClientId;
+        }
+
+        auto pFrameIn1 = std::make_shared<TFrame>( 1000000 );
+        auto pFrameIn2 = std::make_shared<TFrame>( 1000000 );
+        auto pFrame1 = std::make_shared<TFrame>( 1000000 );
+        auto pFrame2 = std::make_shared<TFrame>( 1000000 );
+        auto pFrame3 = std::make_shared<TFrame>( 1000000 );
+
+        std::function<void(int, int, TFramePtr)> putLoop = [&](int _nNum, int _nInterval, TFramePtr _pFrameIn)
         {
             for(int i=0; i<_nNum; i++)
             {
@@ -159,21 +177,21 @@ TEST_CASE( "Splitter", "[splitter]" )
             }
         };
 
-        std::function<void(int, int, FramePtr, int)> getLoop = [&](int _nNum, int _nInterval, FramePtr _pFrameOut, int _nClientId )
+        std::function<void(int, int, TFramePtr, int)> getLoop = [&](int _nNum, int _nInterval, TFramePtr _pFrameOut, int _nClientId )
         {
             for(int i=0; i<_nNum; i++)
             {
                 std::this_thread::sleep_for(_nInterval*1ms);
 
-                CHECK( pSplitter->SplitterGet(_nClientId, _pFrameOut, 1) >= 0 );
+                CHECK( pSplitter->SplitterGet(_nClientId, _pFrameOut, 1000) == 0 );
             }
         };
 
-        std::thread p1( putLoop, 1000, 10,  pFrameIn1 );
-        std::thread p2( putLoop, 1000, 10,  pFrameIn2 );
-        std::thread g1( getLoop, 2000, 10,  pFrame1, 1);
-        std::thread g2( getLoop, 2000, 1,   pFrame2, 2);
-        std::thread g3( getLoop, 2000, 100, pFrame3, 3);
+        std::thread g1( getLoop, 1000, 100,  pFrame1, client[0]);
+        std::thread g2( getLoop, 1000, 10,  pFrame2, client[1]);
+        std::thread g3( getLoop, 1000, 1,  pFrame3, client[2]);
+        std::thread p1( putLoop, 500, 10,  pFrameIn1 );
+        std::thread p2( putLoop, 500, 1,  pFrameIn2 );
 
         p1.join();
         p2.join();
