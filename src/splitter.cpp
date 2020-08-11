@@ -10,6 +10,10 @@
 #include <chrono>
 #include <thread>
 
+#include "easylogging++.h"
+
+INITIALIZE_EASYLOGGINGPP
+
 using namespace std::chrono_literals;
 
 std::shared_ptr<ISplitter>    SplitterCreate(IN int _nMaxBuffers, IN int _nMaxClients)
@@ -56,9 +60,7 @@ bool    ISplitter::SplitterInfoGet(OUT int* _pnMaxBuffers, OUT int* _pnMaxClient
 // Кладём данные в очередь. Если какой-то клиент не успел ещё забрать свои данные, и количество буферов (задержка) для него больше максимального значения, то ждём пока не освободятся буфера (клиент заберет данные) в течении _nTimeOutMsec. Если по истечению времени данные так и не забраны, то удаляем старые данные для этого клиента, добавляем новые (по принципу FIFO) (*). Возвращаем код ошибки, который дает понять что один или несколько клиентов “пропустили” свои данные.
 int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _pVecPut, IN int _nTimeOutMsec)
 {
-    static std::mutex PutMutex;
-
-    const std::lock_guard<std::mutex> LocalLocker(PutMutex);
+    LOG(DEBUG);
 
     std::list<int> slowClients;
 
@@ -84,6 +86,8 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
         }
     }
 
+    LOG(DEBUG) << "Notify waiting clients";
+
     m_NewFrameUploaded.notify_all();
 
     // wait for slow
@@ -94,6 +98,8 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
 
     if ( not slowClients.empty() )
     {
+        LOG(DEBUG) << "Wait for slow clients to get their data";
+
         m_NoSlowClients.wait_for(write_locker, _nTimeOutMsec*1ms);
 
         if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
@@ -118,6 +124,8 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
         res = ERR_FORCED_FRAMES_REMOVE;
     }
 
+    LOG(DEBUG) << "Pop oldest frame";
+
     m_Frames.pop_front();
 
     return res;
@@ -127,6 +135,8 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
 int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector<uint8_t>>& _pVecGet, IN int _nTimeOutMsec)
 {
     TReadLock locker(m_Mutex);
+
+    LOG(DEBUG);
 
     if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
@@ -140,6 +150,8 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 
     if ( pClient->NextFrame() == m_Frames.end() )
     {
+        LOG(DEBUG) << "Wait for new data upload";
+
         auto res = m_NewFrameUploaded.wait_for(locker, _nTimeOutMsec*1ms);
 
         if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
@@ -151,7 +163,12 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 
     _pVecGet = pClient->PopFrame();
 
-    if ( SlowClients().empty() ) m_NoSlowClients.notify_all();
+    if ( SlowClients().empty() )
+    {
+        LOG(DEBUG) << "Notify about unneeded oldest frame";
+
+        m_NoSlowClients.notify_all();
+    }
 
     return 0;
 }
@@ -160,6 +177,8 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 int    ISplitter::SplitterFlush()
 {
     TWriteLock locker(m_Mutex);
+
+    LOG(DEBUG);
 
     if ( m_bIsClosed ) return ERR_SPLITTER_IS_CLOSED;
 
@@ -179,6 +198,8 @@ int    ISplitter::SplitterFlush()
 bool    ISplitter::SplitterClientAdd(OUT int* _pnClientID)
 {
     TWriteLock locker(m_Mutex);
+
+    LOG(DEBUG);
 
     if ( m_bIsClosed ) return false;
 
@@ -202,6 +223,8 @@ bool    ISplitter::SplitterClientRemove(IN int _nClientID)
 {
     TWriteLock locker(m_Mutex);
 
+    LOG(DEBUG);
+
     if ( m_bIsClosed ) return false;
 
     auto ppClient = m_Clients.find(_nClientID);
@@ -220,6 +243,8 @@ bool    ISplitter::SplitterClientGetCount(OUT int* _pnCount)
 {
     TReadLock read_locker(m_Mutex);
 
+    LOG(DEBUG);
+
     if ( m_bIsClosed ) return false;
 
     *_pnCount  = m_Clients.size();
@@ -230,6 +255,8 @@ bool    ISplitter::SplitterClientGetCount(OUT int* _pnCount)
 bool    ISplitter::SplitterClientGetByIndex(IN int _nIndex, OUT int* _pnClientID, OUT int* _pnLatency)
 {
     TReadLock read_locker(m_Mutex);
+
+    LOG(DEBUG);
 
     if ( m_bIsClosed ) return false;
 
@@ -253,7 +280,12 @@ void    ISplitter::SplitterClose()
 {
     TWriteLock write_locker(m_Mutex);
 
+    LOG(DEBUG);
+
+    m_bIsClosed = true;
+
     m_NewFrameUploaded.notify_all();
+    m_NoSlowClients.notify_all();
 }
 
 std::list<int> ISplitter::SlowClients()

@@ -2,20 +2,41 @@
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <string>
 #define CATCH_CONFIG_MAIN
 
 #include <memory>
 #include <type_traits>
 #include <thread>
+#include <regex>
 
 #include "catch.hpp"
 
 #include "splitter.h"
+#include "easylogging++.h"
 
 using namespace std::chrono_literals;
 
+
 TEST_CASE( "Splitter", "[splitter]" )
 {
+    // Easylogger configuration
+    auto FuncResolver = [&] (const el::LogMessage * _message)
+    {
+        std::regex rgx("(\\w+) (\\w+::\\w+)");
+        std::smatch match;
+        if (std::regex_search(_message->func(), match, rgx))
+        {
+            return match[2].str();
+        }
+        return std::string("");
+    };
+    el::Configurations defaultConf;
+    defaultConf.setToDefault();
+    el::Helpers::installCustomFormatSpecifier(el::CustomFormatSpecifier("%fun", FuncResolver));
+    defaultConf.setGlobally( el::ConfigurationType::Format, "%datetime{%h:%m:%s,%g} %thread %fun %fbase:%line %msg"); // %thread %H:%m:%s:%g
+    el::Loggers::reconfigureLogger("default", defaultConf);
+
     const int nMaxClients = 10;
     const int nMaxBufs = 10;
 
@@ -169,6 +190,8 @@ TEST_CASE( "Splitter", "[splitter]" )
 
         std::function<void(int, int, TFramePtr)> putLoop = [&](int _nNum, int _nInterval, TFramePtr _pFrameIn)
         {
+            el::Helpers::setThreadName("PUT");
+
             for(int i=0; i<_nNum; i++)
             {
                 std::this_thread::sleep_for(_nInterval*1ms);
@@ -179,6 +202,8 @@ TEST_CASE( "Splitter", "[splitter]" )
 
         std::function<void(int, int, TFramePtr, int)> getLoop = [&](int _nNum, int _nInterval, TFramePtr _pFrameOut, int _nClientId )
         {
+            el::Helpers::setThreadName("GET");
+
             for(int i=0; i<_nNum; i++)
             {
                 std::this_thread::sleep_for(_nInterval*1ms);
