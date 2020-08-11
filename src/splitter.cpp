@@ -86,7 +86,7 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
         }
     }
 
-    LOG(DEBUG) << "Notify waiting clients";
+    LOG(DEBUG) << "Notify waiting clients about new data arrival";
 
     m_NewFrameUploaded.notify_all();
 
@@ -124,7 +124,7 @@ int    ISplitter::SplitterPut(IN const std::shared_ptr<std::vector<uint8_t>>& _p
         res = ERR_FORCED_FRAMES_REMOVE;
     }
 
-    LOG(DEBUG) << "Pop oldest frame";
+    LOG(DEBUG) << "Remove oldest frame";
 
     m_Frames.pop_front();
 
@@ -160,6 +160,8 @@ int    ISplitter::SplitterGet(IN int _nClientID, OUT std::shared_ptr<std::vector
 
         if ( pClient->NextFrame() == m_Frames.end() ) return ERR_SPOUROIUS_WAKEUP;
     }
+
+    LOG(DEBUG) << "Give frame to client, buf unread: " << std::distance( pClient->NextFrame(), m_Frames.end() ) - 1;
 
     _pVecGet = pClient->PopFrame();
 

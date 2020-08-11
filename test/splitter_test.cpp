@@ -1,19 +1,19 @@
-#include "splitter_definitions.h"
 #include <functional>
 #include <iostream>
 #include <mutex>
 #include <string>
-#define CATCH_CONFIG_MAIN
-
 #include <memory>
 #include <type_traits>
 #include <thread>
 #include <regex>
 
+#define CATCH_CONFIG_MAIN
+
 #include "catch.hpp"
 
-#include "splitter.h"
 #include "easylogging++.h"
+#include "splitter.h"
+#include "splitter_definitions.h"
 
 using namespace std::chrono_literals;
 
@@ -41,6 +41,14 @@ TEST_CASE( "Splitter", "[splitter]" )
     const int nMaxBufs = 10;
 
     auto pSplitter = SplitterCreate(nMaxBufs, nMaxClients);
+
+    int client[3] = {};
+
+    int nClientId = 0;
+
+    int nLatency = -1;
+
+    std::cout << "Start Section" << std::endl;
 
     SECTION("Initialization")
     {
@@ -165,15 +173,7 @@ TEST_CASE( "Splitter", "[splitter]" )
 
     SECTION("Async")
     {
-        std::cout << "Async tests" << std::endl;
-
-        int client[3] = {};
-
-        auto pSplitter = SplitterCreate(nMaxBufs, nMaxClients);
-
-        int nClientId = 0;
-
-        int nLatency = -1;
+        std::cout << "Async test" << std::endl;
 
         for(int i=0; i<3; i++)
         {
@@ -190,7 +190,7 @@ TEST_CASE( "Splitter", "[splitter]" )
 
         std::function<void(int, int, TFramePtr)> putLoop = [&](int _nNum, int _nInterval, TFramePtr _pFrameIn)
         {
-            el::Helpers::setThreadName("PUT");
+           el::Helpers::setThreadName("PUT");
 
             for(int i=0; i<_nNum; i++)
             {
@@ -202,7 +202,7 @@ TEST_CASE( "Splitter", "[splitter]" )
 
         std::function<void(int, int, TFramePtr, int)> getLoop = [&](int _nNum, int _nInterval, TFramePtr _pFrameOut, int _nClientId )
         {
-            el::Helpers::setThreadName("GET");
+           el::Helpers::setThreadName("GET");
 
             for(int i=0; i<_nNum; i++)
             {
@@ -212,16 +212,34 @@ TEST_CASE( "Splitter", "[splitter]" )
             }
         };
 
+        std::cout << "Start threads" << std::endl;
+
         std::thread g1( getLoop, 1000, 100,  pFrame1, client[0]);
         std::thread g2( getLoop, 1000, 10,  pFrame2, client[1]);
         std::thread g3( getLoop, 1000, 1,  pFrame3, client[2]);
         std::thread p1( putLoop, 500, 10,  pFrameIn1 );
         std::thread p2( putLoop, 500, 1,  pFrameIn2 );
 
-        p1.join();
-        p2.join();
+        std::this_thread::sleep_for(1s);
+
+        std::cout << "Flush the buf" << std::endl;
+
+        REQUIRE( pSplitter->SplitterFlush() == 0 );
+
+        std::this_thread::sleep_for(1s);
+
+        std::cout << "Close the splitter" << std::endl;
+
+        pSplitter->SplitterClose();
+
+        std::cout << "Wait for threads" << std::endl;
+
         g1.join();
         g2.join();
         g3.join();
+        p1.join();
+        p2.join();
+
     }
+    std::cout << "Finish Section" << std::endl;
 }

@@ -12,9 +12,10 @@ add_executable(splitter_test ${sources} ${sources_test})
 
 target_include_directories(splitter_test PUBLIC src test src/easylogging++)
 
-# pthread
+# link pthread
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 target_link_libraries(splitter_test PRIVATE Threads::Threads)
 
+# easylogging++ options
 target_compile_definitions(splitter_test PRIVATE ELPP_THREAD_SAFE ELPP_NO_LOG_TO_FILE ELPP_DISABLE_LOGS)
